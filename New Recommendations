@@ -1,0 +1,71 @@
+async function handler({ query, url }) {
+  try {
+    let jobDescription = query || '';
+    
+    if (url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('Failed to fetch job description from URL');
+      }
+      const urlContent = await response.text();
+      jobDescription = jobDescription ? `${jobDescription}\n\n${urlContent}` : urlContent;
+    }
+
+    if (!jobDescription) {
+      return { error: 'No job description provided' };
+    }
+
+    const assessments = await sql`SELECT * FROM assessments`;
+
+    const geminiResponse = await fetch('/integrations/google-gemini-1-5/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [
+          {
+            role: 'system',
+            content: `You are an expert at matching job requirements with assessment tools. You will analyze a job description and select the most relevant assessments from a provided list. Consider the job requirements, skills needed, and assessment characteristics.`
+          },
+          {
+            role: 'user',
+            content: `Job Description:\n${jobDescription}\n\nAvailable Assessments:\n${JSON.stringify(assessments, null, 2)}\n\nPlease analyze the job description and return the IDs of up to 10 most relevant assessments, ordered by relevance. Only return assessment IDs that would be valuable for this role.`
+          }
+        ],
+        json_schema: {
+          name: "assessment_recommendations",
+          schema: {
+            type: "object",
+            properties: {
+              assessment_ids: {
+                type: "array",
+                items: { type: "integer" }
+              }
+            },
+            required: ["assessment_ids"],
+            additionalProperties: false
+          }
+        }
+      })
+    });
+
+    const geminiData = await geminiResponse.json();
+    const { assessment_ids } = JSON.parse(geminiData.choices[0].message.content);
+
+    if (!assessment_ids.length) {
+      return { recommendations: [] };
+    }
+
+    const recommendations = await sql`
+      SELECT * FROM assessments 
+      WHERE id = ANY(${assessment_ids})
+      ORDER BY array_position(${assessment_ids}::int[], id)
+      LIMIT 10
+    `;
+
+    return { recommendations };
+  } catch (error) {
+    return { error: 'Failed to process recommendation request' };
+  }
+}
+
+
